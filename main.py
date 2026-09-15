@@ -17,15 +17,15 @@ def analyze_homodimer(req: HomodimerRequest):
         seq = req.sequence.upper().replace('U', 'T')
         p3_mod = getattr(primer3, 'bindings', primer3)
         
-        # salt_formula=1 enables Owczarzy (2008) divalent salt correction
+        # calc_end_stability automatically computes Owczarzy divalent salt 
+        # effects when dv_conc and dntp_conc are provided.
         end_res = p3_mod.calc_end_stability(
             seq,
             seq,
             mv_conc=req.na_mM,
             dv_conc=req.mg_mM,
             dntp_conc=req.dntp_mM,
-            temp_c=req.temperature_c,
-            salt_formula=1
+            temp_c=req.temperature_c
         )
 
         homo_res = p3_mod.calc_homodimer(
@@ -33,14 +33,13 @@ def analyze_homodimer(req: HomodimerRequest):
             mv_conc=req.na_mM,
             dv_conc=req.mg_mM,
             dntp_conc=req.dntp_mM,
-            temp_c=req.temperature_c,
-            salt_formula=1
+            temp_c=req.temperature_c
         )
 
         end_dg = round(end_res.dg / 1000.0, 2)
         global_dg = round(homo_res.dg / 1000.0, 2)
 
-        # Benchling displays 3'-end dimer energy (-3.55 kcal/mol) as the Min ΔG Homodimer value
+        # Benchling displays 3'-end dimer energy as the primary Min ΔG value
         reported_dg = end_dg
 
         warning = global_dg < -5.0 or end_dg < -3.0
@@ -53,6 +52,7 @@ def analyze_homodimer(req: HomodimerRequest):
             "temperature_c": req.temperature_c,
             "na_mM": req.na_mM,
             "mg_mM": req.mg_mM,
+            "dntp_mM": req.dntp_mM,
             "redesign_recommended": warning,
             "alignment": {
                 "structure_found": getattr(homo_res, 'structure_found', True),

@@ -12,18 +12,24 @@ def health_check():
     return {"status": "ok", "service": "ViennaRNA API"}
 
 def generate_svg_string(sequence: str, structure: str) -> str:
-    """Generates a clean SVG plot string directly from NAView coordinates."""
-    # ViennaRNA returns a 3-element tuple or coordinate object; unpack safely
-    res = RNA.naview_xy_coordinates(structure)
-    if isinstance(res, tuple) and len(res) >= 2:
-        x_coords, y_coords = res[0], res[1]
-    else:
-        x_coords, y_coords = res.X, res.Y
-
-    # Convert coordinates to standard Python lists of floats
-    x_coords = [float(x) for x in x_coords]
-    y_coords = [float(y) for y in y_coords]
+    """Generates a clean SVG plot string by extracting NAView coordinates."""
+    n = len(sequence)
+    coords_obj = RNA.naview_xy_coordinates(structure)
     
+    # Safely extract X and Y values from ViennaRNA COORDINATE object
+    x_coords = []
+    y_coords = []
+    
+    for i in range(1, n + 1):  # ViennaRNA coordinate arrays are 1-indexed
+        try:
+            pt = coords_obj.get(i)
+            x_coords.append(float(pt.X))
+            y_coords.append(float(pt.Y))
+        except AttributeError:
+            # Fallback if get() returns a tuple or direct float
+            x_coords.append(float(coords_obj.X[i]))
+            y_coords.append(float(coords_obj.Y[i]))
+
     # Calculate bounding box
     margin = 40
     min_x, max_x = min(x_coords) - margin, max(x_coords) + margin
@@ -54,7 +60,7 @@ def generate_svg_string(sequence: str, structure: str) -> str:
     ]
 
     # Draw backbone connection lines
-    for i in range(len(sequence) - 1):
+    for i in range(n - 1):
         svg_lines.append(
             f'<line x1="{x_coords[i]}" y1="{y_coords[i]}" x2="{x_coords[i+1]}" y2="{y_coords[i+1]}" class="backbone" />'
         )

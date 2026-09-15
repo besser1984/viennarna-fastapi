@@ -12,16 +12,17 @@ def health_check():
     return {"status": "ok", "service": "ViennaRNA API"}
 
 def generate_svg_string(sequence: str, structure: str) -> str:
-    """Generates a clean SVG plot string by unpacking NAView coordinates safely."""
-    # RNA.naview_xy_coordinates returns a 3-tuple: (x_coords, y_coords, status)
-    res = RNA.naview_xy_coordinates(structure)
-    x_tuple, y_tuple = res[0], res[1]
-    
-    # Convert coordinates to standard float lists
-    x_coords = [float(x) for x in x_tuple]
-    y_coords = [float(y) for y in y_tuple]
-    
+    """Generates an SVG plot string by indexing into ViennaRNA COORDINATE pointers."""
     n = len(sequence)
+    
+    # naview_xy_coordinates returns (x_coords_struct, y_coords_struct, status)
+    coords = RNA.naview_xy_coordinates(structure)
+    x_struct = coords[0]
+    y_struct = coords[1]
+    
+    # Index directly into the SWIG C-array (0 to n-1)
+    x_coords = [float(x_struct[i]) for i in range(n)]
+    y_coords = [float(y_struct[i]) for i in range(n)]
 
     # Calculate bounding box
     margin = 40

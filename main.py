@@ -12,17 +12,13 @@ def health_check():
     return {"status": "ok", "service": "ViennaRNA API"}
 
 def generate_svg_string(sequence: str, structure: str) -> str:
-    """Generates an SVG plot string by indexing into ViennaRNA COORDINATE pointers."""
-    n = len(sequence)
+    """Generates a clean SVG plot using native Python coordinate objects."""
+    # RNA.get_xy_coordinates returns a native list of coordinate objects
+    coords = RNA.get_xy_coordinates(structure)
     
-    # naview_xy_coordinates returns (x_coords_struct, y_coords_struct, status)
-    coords = RNA.naview_xy_coordinates(structure)
-    x_struct = coords[0]
-    y_struct = coords[1]
-    
-    # Index directly into the SWIG C-array (0 to n-1)
-    x_coords = [float(x_struct[i]) for i in range(n)]
-    y_coords = [float(y_struct[i]) for i in range(n)]
+    # Extract X and Y safely using standard Python attributes
+    x_coords = [float(coords.get(i).X) for i in range(len(sequence))]
+    y_coords = [float(coords.get(i).Y) for i in range(len(sequence))]
 
     # Calculate bounding box
     margin = 40
@@ -54,7 +50,7 @@ def generate_svg_string(sequence: str, structure: str) -> str:
     ]
 
     # Draw backbone connection lines
-    for i in range(n - 1):
+    for i in range(len(sequence) - 1):
         svg_lines.append(
             f'<line x1="{x_coords[i]}" y1="{y_coords[i]}" x2="{x_coords[i+1]}" y2="{y_coords[i+1]}" class="backbone" />'
         )

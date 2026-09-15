@@ -15,35 +15,29 @@ def analyze_homodimer(req: HomodimerRequest):
     try:
         seq = req.sequence.upper().replace('U', 'T')
 
-        # Safely resolve function bindings across primer3-py version variants
         p3_mod = getattr(primer3, 'bindings', primer3)
         
-        # 3'-End stability calculation (Benchling primary display)
-        calc_end = getattr(p3_mod, 'calc_end_stability', getattr(p3_mod, 'calc_end_dimer', None))
-        calc_homo = getattr(p3_mod, 'calc_homodimer', None)
-
-        if not calc_end or not calc_homo:
-            raise AttributeError("Could not bind primer3 thermodynamic calculation functions.")
-
-        end_res = calc_end(
+        # 1. 3'-End stability (pass seq twice for self-dimerization)
+        end_res = p3_mod.calc_end_stability(
+            seq,
             seq,
             mv_conc=req.na_mM,
             dv_conc=req.mg_mM,
             temp_c=req.temperature_c
         )
 
-        homo_res = calc_homo(
+        # 2. Global homodimer stability
+        homo_res = p3_mod.calc_homodimer(
             seq,
             mv_conc=req.na_mM,
             dv_conc=req.mg_mM,
             temp_c=req.temperature_c
         )
 
-        # Convert dG from cal/mol to kcal/mol
         end_dg = round(end_res.dg / 1000.0, 2)
         global_dg = round(homo_res.dg / 1000.0, 2)
 
-        # Benchling displays 3'-end dimer energy (-3.55 kcal/mol) as Min ΔG Homodimer
+        # Benchling displays 3'-end dimer energy (-3.55 kcal/mol) as the Min ΔG value
         reported_dg = end_dg
 
         warning = global_dg < -5.0 or end_dg < -3.0

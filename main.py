@@ -12,11 +12,12 @@ def health_check():
     return {"status": "ok", "service": "ViennaRNA API"}
 
 def generate_svg_string(sequence: str, structure: str) -> str:
-    """Generates a clean SVG plot string by directly unpacking the NAView coordinates tuple."""
-    # RNA.naview_xy_coordinates returns ((x0, x1, ...), (y0, y1, ...))
-    x_tuple, y_tuple = RNA.naview_xy_coordinates(structure)
+    """Generates a clean SVG plot string by unpacking NAView coordinates safely."""
+    # RNA.naview_xy_coordinates returns a 3-tuple: (x_coords, y_coords, status)
+    res = RNA.naview_xy_coordinates(structure)
+    x_tuple, y_tuple = res[0], res[1]
     
-    # Convert directly to standard float lists
+    # Convert coordinates to standard float lists
     x_coords = [float(x) for x in x_tuple]
     y_coords = [float(y) for y in y_tuple]
     

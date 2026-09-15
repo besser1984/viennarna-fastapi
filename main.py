@@ -6,11 +6,11 @@ app = FastAPI()
 
 class HomodimerRequest(BaseModel):
     sequence: str = Field(..., example="TGACTATAAGTCCTGGCGATTTGATGCA")
-    temperature_c: float = Field(60.0, description="Temperature in Celsius")
-    na_mM: float = Field(50.0, description="Monovalent Na+ concentration in mM")
-    mg_mM: float = Field(3.5, description="Divalent Mg2+ concentration in mM")
+    temperature_c: float = Field(60.0)
+    na_mM: float = Field(50.0)
+    mg_mM: float = Field(3.5)
 
-# SantaLucia (1998) Unified NN Parameters (dH in kcal/mol, dS in cal/mol/K at 1 M Na+)
+# SantaLucia 1998 Unified NN parameters (dH in kcal/mol, dS in cal/mol/K)
 NN_PARAMS = {
     "AA/TT": (-7.6, -21.3), "TT/AA": (-7.6, -21.3),
     "AT/TA": (-7.2, -20.4), "TA/AT": (-7.2, -21.3),
@@ -25,81 +25,82 @@ NN_PARAMS = {
 COMPLEMENT = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
 
 def get_complement(seq: str) -> str:
-    return "".join(COMPLEMENT.get(base, 'N') for base in seq)
+    return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
-def calculate_salt_corrected_ds(ds_base: float, N_pairs: int, na_mM: float, mg_mM: float) -> float:
-    """Applies Owczarzy/SantaLucia salt correction to entropy (dS)."""
-    Na = na_mM / 1000.0
-    Mg = mg_mM / 1000.0
-
-    # Effective monovalent concentration approximation
-    if Mg > 0:
-        Monovalent_Equivalent = Na + 120 * math.sqrt(Mg)
+def get_owczarzy_salt_corrected_ds(ds_base: float, num_bp: int, na_mM: float, mg_mM: float) -> float:
+    """Owczarzy et al. (2008) divalent/monovalent salt correction on entropy (dS)."""
+    na = na_mM / 1000.0
+    mg = mg_mM / 1000.0
+    
+    # Calculate effective monovalent concentration under divalent excess
+    if mg > 0:
+        monovalent_eq = na + 120.0 * math.sqrt(mg)
     else:
-        Monovalent_Equivalent = Na
+        monovalent_eq = na
 
-    # Salt correction per phosphate backbone
-    if Monovalent_Equivalent > 0:
-        ds_correction = 0.368 * (N_pairs - 1) * math.log(Monovalent_Equivalent)
+    if monovalent_eq > 0 and num_bp > 1:
+        # 0.368 cal/mol/K per phosphate bond
+        ds_corr = 0.368 * (num_bp - 1) * math.log(monovalent_eq)
     else:
-        ds_correction = 0.0
+        ds_corr = 0.0
 
-    return ds_base + ds_correction
+    return ds_base + ds_corr
 
 def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float):
     seq1 = sequence.upper().replace('U', 'T')
-    seq2_rev = get_complement(seq1)[::-1]
+    seq2 = get_complement(seq1)[::-1]
     n = len(seq1)
     
-    T_kelvin = temp_c + 273.15
+    T_k = temp_c + 273.15
     min_dg = float('inf')
     best_alignment = None
 
-    # Slide antiparallel strands across all offsets
+    # Evaluate all antiparallel overlap positions
     for offset in range(-(n - 1), n):
-        start1 = max(0, offset)
-        start2 = max(0, -offset)
-        overlap_len = min(n - start1, n - start2)
-        
+        s1 = max(0, offset)
+        s2 = max(0, -offset)
+        overlap_len = min(n - s1, n - s2)
+
         if overlap_len < 2:
             continue
 
-        sub1 = seq1[start1:start1 + overlap_len]
-        sub2 = seq2_rev[start2:start2 + overlap_len]
+        sub1 = seq1[s1:s1 + overlap_len]
+        sub2 = seq2[s2:s2 + overlap_len]
 
-        # Scan for contiguous matching sub-blocks within the alignment window
-        # Truncate single-stranded overhangs to calculate true duplex stability
+        # Scan for paired blocks inside alignment region
         i = 0
         while i < overlap_len - 1:
-            # Check for standard complementary pairs
-            b1, b2 = sub1[i:i+2], sub2[i:i+2]
-            pair_key = f"{b1}/{b2}"
-            
-            if pair_key in NN_PARAMS:
+            if f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}" in NN_PARAMS:
                 block_dh = 0.0
                 block_ds = 0.0
-                
-                # Terminal initiation penalty (SantaLucia 1998)
-                if sub1[i] in 'AT': 
+                bp_count = 1
+
+                # Apply helix initiation penalty (SantaLucia 1998)
+                if sub1[i] in 'AT':
                     block_dh += 2.3; block_ds += 4.1
-                else: 
+                else:
                     block_dh += 0.1; block_ds += -2.8
 
-                match_len = 1
                 while i < overlap_len - 1:
-                    pk = f"{sub1[i]:s}{sub1[i+1]:s}/{sub2[i]:s}{sub2[i+1]:s}"
-                    if pk in NN_PARAMS:
-                        dh, ds = NN_PARAMS[pk]
+                    pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+                    if pair_key in NN_PARAMS:
+                        dh, ds = NN_PARAMS[pair_key]
                         block_dh += dh
                         block_ds += ds
-                        match_len += 1
+                        bp_count += 1
                         i += 1
                     else:
                         break
 
-                # Apply salt correction to the paired duplex block
-                ds_corr = calculate_salt_corrected_ds(block_ds, match_len, na_mM, mg_mM)
-                dg = block_dh - (T_kelvin * (ds_corr / 1000.0))
+                # Apply terminal penalty on block end
+                if sub1[i-1] in 'AT':
+                    block_dh += 2.3; block_ds += 4.1
+                else:
+                    block_dh += 0.1; block_ds += -2.8
+
+                # Correct entropy for buffer cations
+                ds_corr = get_owczarzy_salt_corrected_ds(block_ds, bp_count, na_mM, mg_mM)
+                dg = block_dh - (T_k * (ds_corr / 1000.0))
 
                 if dg < min_dg:
                     min_dg = dg
@@ -107,8 +108,8 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
                         "offset": offset,
                         "seq1": sub1,
                         "seq2": sub2,
-                        "overlap_len": match_len,
-                        "is_3prime_end": (start1 + overlap_len == n) or (start2 + overlap_len == n)
+                        "overlap_len": bp_count,
+                        "is_3prime_end": (s1 + overlap_len == n) or (s2 + overlap_len == n)
                     }
             else:
                 i += 1
@@ -117,13 +118,13 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         min_dg = 0.0
 
     return round(min_dg, 2), best_alignment
-    
+
 @app.post("/analyze")
 def analyze_homodimer(req: HomodimerRequest):
     try:
         min_dg, alignment = calculate_homodimer(req.sequence, req.temperature_c, req.na_mM, req.mg_mM)
         
-        # Risk assessment heuristics at elevated PCR annealing temperatures
+        # Heuristics: Flag homodimers with Global ΔG < -5.0 or 3'-end ΔG < -3.0
         warning = False
         if min_dg < -5.0 or (alignment and alignment["is_3prime_end"] and min_dg < -3.0):
             warning = True

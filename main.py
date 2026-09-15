@@ -15,17 +15,15 @@ def analyze_homodimer(req: HomodimerRequest):
     try:
         seq = req.sequence.upper().replace('U', 'T')
 
-        # Calculate using Primer3 C-library (same engine as Benchling)
-        # 1. End Dimer (3'-end stability)
-        end_res = primer3.calc_end_dimer(
+        # Use primer3.bindings for the thermodynamic calculation functions
+        end_res = primer3.bindings.calc_end_dimer(
             seq,
             mv_conc=req.na_mM,
             dv_conc=req.mg_mM,
             temp_c=req.temperature_c
         )
 
-        # 2. Global Homodimer
-        homo_res = primer3.calc_homodimer(
+        homo_res = primer3.bindings.calc_homodimer(
             seq,
             mv_conc=req.na_mM,
             dv_conc=req.mg_mM,
@@ -36,10 +34,9 @@ def analyze_homodimer(req: HomodimerRequest):
         end_dg = round(end_res.dg / 1000.0, 2)
         global_dg = round(homo_res.dg / 1000.0, 2)
 
-        # Benchling displays 3'-end dimer energy for Min ΔG Homodimer when evaluating primer risks
+        # Benchling displays 3'-end dimer energy (-3.55 kcal/mol) as the primary Min ΔG value
         reported_dg = end_dg
 
-        # Heuristic flag
         warning = global_dg < -5.0 or end_dg < -3.0
 
         return {

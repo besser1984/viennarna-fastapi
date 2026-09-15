@@ -66,24 +66,20 @@ def calculate_benchling_homodimer(sequence: str, temp_c: float, na_mM: float, mg
     if not HAS_VIENNARNA:
         raise RuntimeError("viennarna package is required on Railway.")
 
-    # 1. Setup ViennaRNA Model Details for DNA parameters at target temperature
-    md = RNA.md()
-    md.temperature = temp_c
+    # 1. Set ViennaRNA global parameters via cvar for 2-argument duplexfold() call
+    RNA.cvar.temperature = temp_c
     RNA.read_parameter_file("dna_mathews1999.par")
 
-    # 2. Get Minimum Free Energy Duplex Structure via ViennaRNA
-    dup = RNA.duplexfold(seq_clean, seq_clean, md)
+    # 2. duplexfold takes exactly 2 sequence strings
+    dup = RNA.duplexfold(seq_clean, seq_clean)
     struct = dup.structure
     
     # 3. Dynamic Stem Extraction based on ViennaRNA pairing boundaries
-    # Parse pairing indices from duplexfold structure output
-    # Example structure format: ".((((...&...))))"
     parts = struct.split('&')
     s1_brackets = parts[0].count('(')
     s2_brackets = parts[1].count(')')
     bp_count = min(s1_brackets, s2_brackets)
 
-    # Extract duplex sub-sequences from alignment boundaries
     i1 = dup.i - bp_count
     j1 = dup.i
     sub1 = seq_clean[i1:j1]

@@ -12,23 +12,15 @@ def health_check():
     return {"status": "ok", "service": "ViennaRNA API"}
 
 def generate_svg_string(sequence: str, structure: str) -> str:
-    """Generates a clean SVG plot string by extracting NAView coordinates."""
+    """Generates a clean SVG plot string by directly unpacking the NAView coordinates tuple."""
+    # RNA.naview_xy_coordinates returns ((x0, x1, ...), (y0, y1, ...))
+    x_tuple, y_tuple = RNA.naview_xy_coordinates(structure)
+    
+    # Convert directly to standard float lists
+    x_coords = [float(x) for x in x_tuple]
+    y_coords = [float(y) for y in y_tuple]
+    
     n = len(sequence)
-    coords_obj = RNA.naview_xy_coordinates(structure)
-    
-    # Safely extract X and Y values from ViennaRNA COORDINATE object
-    x_coords = []
-    y_coords = []
-    
-    for i in range(1, n + 1):  # ViennaRNA coordinate arrays are 1-indexed
-        try:
-            pt = coords_obj.get(i)
-            x_coords.append(float(pt.X))
-            y_coords.append(float(pt.Y))
-        except AttributeError:
-            # Fallback if get() returns a tuple or direct float
-            x_coords.append(float(coords_obj.X[i]))
-            y_coords.append(float(coords_obj.Y[i]))
 
     # Calculate bounding box
     margin = 40

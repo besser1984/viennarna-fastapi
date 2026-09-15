@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 app = FastAPI()
 
 class HomodimerRequest(BaseModel):
-    sequence: str = Field(..., example="GCGAATTCGC")
+    sequence: str = Field(..., example="TGACTATAAGTCCTGGCGATTTGATGCA")
     temperature_c: float = Field(60.0, description="Temperature in Celsius")
     na_mM: float = Field(50.0, description="Monovalent Na+ concentration in mM")
     mg_mM: float = Field(3.5, description="Divalent Mg2+ concentration in mM")
@@ -28,21 +28,17 @@ def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(base, 'N') for base in seq)
 
 def calculate_salt_corrected_ds(ds_base: float, N_pairs: int, na_mM: float, mg_mM: float) -> float:
-    """
-    Applies salt correction to entropy (dS) based on SantaLucia (1998) / Owczarzy et al.
-    Convert mM to M for calculation.
-    """
+    """Applies Owczarzy/SantaLucia salt correction to entropy (dS)."""
     Na = na_mM / 1000.0
     Mg = mg_mM / 1000.0
 
-    # Effective monovalent concentration approximation (Owczarzy 2008 ratio)
+    # Effective monovalent concentration approximation
     if Mg > 0:
         Monovalent_Equivalent = Na + 120 * math.sqrt(Mg)
     else:
         Monovalent_Equivalent = Na
 
-    # Salt correction per phosphate backbone (SantaLucia 1998 formula)
-    # R * 0.368 * (N_pairs - 1) * ln([Monovalent_Equivalent])
+    # Salt correction per phosphate backbone
     if Monovalent_Equivalent > 0:
         ds_correction = 0.368 * (N_pairs - 1) * math.log(Monovalent_Equivalent)
     else:
@@ -59,6 +55,7 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
     min_dg = 0.0
     best_alignment = None
 
+    # Slide antiparallel strands through all offset positions
     for offset in range(-(n - 1), n):
         start1 = max(0, offset)
         start2 = max(0, -offset)
@@ -73,7 +70,7 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         total_dh = 0.0
         total_ds = 0.0
         
-        # Initiation penalties
+        # Terminal initiation penalties (SantaLucia 1998)
         if sub1[0] in 'AT': total_dh += 2.3; total_ds += 4.1
         else: total_dh += 0.1; total_ds += -2.8
 
@@ -85,14 +82,15 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
                 total_dh += dh
                 total_ds += ds
             else:
-                total_ds -= 6.0
+                total_ds -= 6.0  # Mismatch approximation
 
-        # Apply Na+ / Mg2+ correction to entropy (dS)
+        # Apply Na+ / Mg2+ correction to entropy
         total_ds_corrected = calculate_salt_corrected_ds(total_ds, overlap_len, na_mM, mg_mM)
 
-        # Calculate ΔG°(T) = ΔH° - T * ΔS°_corrected
+        # Calculate ΔG°(T) = ΔH° - T * ΔS°_corrected (convert dS from cal to kcal)
         dg = total_dh - (T_kelvin * (total_ds_corrected / 1000.0))
         
+        # Track Global Minimum ΔG
         if dg < min_dg:
             min_dg = dg
             best_alignment = {
@@ -110,8 +108,9 @@ def analyze_homodimer(req: HomodimerRequest):
     try:
         min_dg, alignment = calculate_homodimer(req.sequence, req.temperature_c, req.na_mM, req.mg_mM)
         
+        # Risk assessment heuristics at elevated PCR annealing temperatures
         warning = False
-        if min_dg < -6.0 or (alignment and alignment["is_3prime_end"] and min_dg < -5.0):
+        if min_dg < -5.0 or (alignment and alignment["is_3prime_end"] and min_dg < -3.0):
             warning = True
 
         return {

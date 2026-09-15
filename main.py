@@ -53,7 +53,7 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         sub1 = seq1[s1:s1 + overlap_len]
         sub2 = seq2[s2:s2 + overlap_len]
 
-        # Evaluate every contiguous matching block within this offset window
+        # Evaluate contiguous matching blocks within this offset window
         i = 0
         while i < overlap_len - 1:
             pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
@@ -63,7 +63,7 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
                 block_ds = 0.0
                 bp_count = 1
 
-                # Initiation penalty (SantaLucia 1998)
+                # Terminal initiation penalty (SantaLucia 1998)
                 if sub1[i] in 'AT':
                     block_dh += 2.3; block_ds += 4.1
                 else:

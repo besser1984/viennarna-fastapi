@@ -10,7 +10,7 @@ class HomodimerRequest(BaseModel):
     na_mM: float = Field(50.0)
     mg_mM: float = Field(3.5)
 
-# SantaLucia 1998 Unified NN parameters (dH in kcal/mol, dS in cal/mol/K)
+# SantaLucia (1998) NN Parameters (dH in kcal/mol, dS in cal/mol/K)
 NN_PARAMS = {
     "AA/TT": (-7.6, -21.3), "TT/AA": (-7.6, -21.3),
     "AT/TA": (-7.2, -20.4), "TA/AT": (-7.2, -21.3),
@@ -27,25 +27,6 @@ COMPLEMENT = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
 def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
-def get_owczarzy_salt_corrected_ds(ds_base: float, num_bp: int, na_mM: float, mg_mM: float) -> float:
-    """Owczarzy et al. (2008) divalent/monovalent salt correction on entropy (dS)."""
-    na = na_mM / 1000.0
-    mg = mg_mM / 1000.0
-    
-    # Calculate effective monovalent concentration under divalent excess
-    if mg > 0:
-        monovalent_eq = na + 120.0 * math.sqrt(mg)
-    else:
-        monovalent_eq = na
-
-    if monovalent_eq > 0 and num_bp > 1:
-        # 0.368 cal/mol/K per phosphate bond
-        ds_corr = 0.368 * (num_bp - 1) * math.log(monovalent_eq)
-    else:
-        ds_corr = 0.0
-
-    return ds_base + ds_corr
-
 def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float):
     seq1 = sequence.upper().replace('U', 'T')
     seq2 = get_complement(seq1)[::-1]
@@ -55,7 +36,11 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
     min_dg = float('inf')
     best_alignment = None
 
-    # Evaluate all antiparallel overlap positions
+    # Calculate salt correction factor once for the effective monovalent concentration
+    na = na_mM / 1000.0
+    mg = mg_mM / 1000.0
+    monovalent_eq = na + 120.0 * math.sqrt(mg) if mg > 0 else na
+
     for offset in range(-(n - 1), n):
         s1 = max(0, offset)
         s2 = max(0, -offset)
@@ -67,52 +52,58 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         sub1 = seq1[s1:s1 + overlap_len]
         sub2 = seq2[s2:s2 + overlap_len]
 
-        # Scan for paired blocks inside alignment region
-        i = 0
-        while i < overlap_len - 1:
-            if f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}" in NN_PARAMS:
-                block_dh = 0.0
-                block_ds = 0.0
-                bp_count = 1
+        # Score contiguous stacks across the overlap window
+        total_dh = 0.0
+        total_ds = 0.0
+        bp_count = 0
+        in_helix = False
 
-                # Apply helix initiation penalty (SantaLucia 1998)
-                if sub1[i] in 'AT':
-                    block_dh += 2.3; block_ds += 4.1
-                else:
-                    block_dh += 0.1; block_ds += -2.8
-
-                while i < overlap_len - 1:
-                    pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
-                    if pair_key in NN_PARAMS:
-                        dh, ds = NN_PARAMS[pair_key]
-                        block_dh += dh
-                        block_ds += ds
-                        bp_count += 1
-                        i += 1
+        for i in range(overlap_len - 1):
+            pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+            
+            if pair_key in NN_PARAMS:
+                dh, ds = NN_PARAMS[pair_key]
+                total_dh += dh
+                total_ds += ds
+                bp_count += 1
+                
+                # Single initiation penalty applied at the start of a helix
+                if not in_helix:
+                    if sub1[i] in 'AT':
+                        total_dh += 2.3; total_ds += 4.1
                     else:
-                        break
-
-                # Apply terminal penalty on block end
-                if sub1[i-1] in 'AT':
-                    block_dh += 2.3; block_ds += 4.1
-                else:
-                    block_dh += 0.1; block_ds += -2.8
-
-                # Correct entropy for buffer cations
-                ds_corr = get_owczarzy_salt_corrected_ds(block_ds, bp_count, na_mM, mg_mM)
-                dg = block_dh - (T_k * (ds_corr / 1000.0))
-
-                if dg < min_dg:
-                    min_dg = dg
-                    best_alignment = {
-                        "offset": offset,
-                        "seq1": sub1,
-                        "seq2": sub2,
-                        "overlap_len": bp_count,
-                        "is_3prime_end": (s1 + overlap_len == n) or (s2 + overlap_len == n)
-                    }
+                        total_dh += 0.1; total_ds += -2.8
+                    in_helix = True
             else:
-                i += 1
+                if in_helix:
+                    # Terminal penalty on helix closure
+                    if sub1[i] in 'AT':
+                        total_dh += 2.3; total_ds += 4.1
+                    else:
+                        total_dh += 0.1; total_ds += -2.8
+                    in_helix = False
+
+        # Close terminal penalty if alignment ends inside a helix
+        if in_helix:
+            if sub1[overlap_len - 1] in 'AT':
+                total_dh += 2.3; total_ds += 4.1
+            else:
+                total_dh += 0.1; total_ds += -2.8
+
+        if bp_count > 0:
+            # Owczarzy (2008) salt correction per phosphate bond
+            ds_corr = total_ds + (0.368 * (bp_count) * math.log(monovalent_eq))
+            dg = total_dh - (T_k * (ds_corr / 1000.0))
+
+            if dg < min_dg:
+                min_dg = dg
+                best_alignment = {
+                    "offset": offset,
+                    "seq1": sub1,
+                    "seq2": sub2,
+                    "overlap_len": bp_count,
+                    "is_3prime_end": (s1 + overlap_len == n) or (s2 + overlap_len == n)
+                }
 
     if min_dg == float('inf'):
         min_dg = 0.0
@@ -124,7 +115,6 @@ def analyze_homodimer(req: HomodimerRequest):
     try:
         min_dg, alignment = calculate_homodimer(req.sequence, req.temperature_c, req.na_mM, req.mg_mM)
         
-        # Heuristics: Flag homodimers with Global ΔG < -5.0 or 3'-end ΔG < -3.0
         warning = False
         if min_dg < -5.0 or (alignment and alignment["is_3prime_end"] and min_dg < -3.0):
             warning = True

@@ -10,7 +10,7 @@ class HomodimerRequest(BaseModel):
     na_mM: float = Field(50.0)
     mg_mM: float = Field(3.5)
 
-# SantaLucia (1998) NN Parameters (dH in kcal/mol, dS in cal/mol/K)
+# SantaLucia (1998) Unified NN parameters (dH in kcal/mol, dS in cal/mol/K)
 NN_PARAMS = {
     "AA/TT": (-7.6, -21.3), "TT/AA": (-7.6, -21.3),
     "AT/TA": (-7.2, -20.4), "TA/AT": (-7.2, -21.3),
@@ -36,11 +36,12 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
     min_dg = float('inf')
     best_alignment = None
 
-    # Calculate salt correction factor once for the effective monovalent concentration
+    # Owczarzy 2008 equivalent monovalent salt calculation
     na = na_mM / 1000.0
     mg = mg_mM / 1000.0
     monovalent_eq = na + 120.0 * math.sqrt(mg) if mg > 0 else na
 
+    # Slide antiparallel sequence through all alignment offsets
     for offset in range(-(n - 1), n):
         s1 = max(0, offset)
         s2 = max(0, -offset)
@@ -52,58 +53,49 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         sub1 = seq1[s1:s1 + overlap_len]
         sub2 = seq2[s2:s2 + overlap_len]
 
-        # Score contiguous stacks across the overlap window
-        total_dh = 0.0
-        total_ds = 0.0
-        bp_count = 0
-        in_helix = False
-
-        for i in range(overlap_len - 1):
+        # Evaluate every contiguous matching block within this offset window
+        i = 0
+        while i < overlap_len - 1:
             pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
             
             if pair_key in NN_PARAMS:
-                dh, ds = NN_PARAMS[pair_key]
-                total_dh += dh
-                total_ds += ds
-                bp_count += 1
-                
-                # Single initiation penalty applied at the start of a helix
-                if not in_helix:
-                    if sub1[i] in 'AT':
-                        total_dh += 2.3; total_ds += 4.1
+                block_dh = 0.0
+                block_ds = 0.0
+                bp_count = 1
+
+                # Initiation penalty (SantaLucia 1998)
+                if sub1[i] in 'AT':
+                    block_dh += 2.3; block_ds += 4.1
+                else:
+                    block_dh += 0.1; block_ds += -2.8
+
+                start_idx = i
+                while i < overlap_len - 1:
+                    pk = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+                    if pk in NN_PARAMS:
+                        dh, ds = NN_PARAMS[pk]
+                        block_dh += dh
+                        block_ds += ds
+                        bp_count += 1
+                        i += 1
                     else:
-                        total_dh += 0.1; total_ds += -2.8
-                    in_helix = True
+                        break
+
+                # Apply Owczarzy 2008 salt correction per phosphate bond
+                ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
+                dg = block_dh - (T_k * (ds_corr / 1000.0))
+
+                if dg < min_dg:
+                    min_dg = dg
+                    best_alignment = {
+                        "offset": offset,
+                        "seq1": sub1[start_idx:i+1],
+                        "seq2": sub2[start_idx:i+1],
+                        "overlap_len": bp_count,
+                        "is_3prime_end": (s1 + i + 1 == n) or (s2 + i + 1 == n)
+                    }
             else:
-                if in_helix:
-                    # Terminal penalty on helix closure
-                    if sub1[i] in 'AT':
-                        total_dh += 2.3; total_ds += 4.1
-                    else:
-                        total_dh += 0.1; total_ds += -2.8
-                    in_helix = False
-
-        # Close terminal penalty if alignment ends inside a helix
-        if in_helix:
-            if sub1[overlap_len - 1] in 'AT':
-                total_dh += 2.3; total_ds += 4.1
-            else:
-                total_dh += 0.1; total_ds += -2.8
-
-        if bp_count > 0:
-            # Owczarzy (2008) salt correction per phosphate bond
-            ds_corr = total_ds + (0.368 * (bp_count) * math.log(monovalent_eq))
-            dg = total_dh - (T_k * (ds_corr / 1000.0))
-
-            if dg < min_dg:
-                min_dg = dg
-                best_alignment = {
-                    "offset": offset,
-                    "seq1": sub1,
-                    "seq2": sub2,
-                    "overlap_len": bp_count,
-                    "is_3prime_end": (s1 + overlap_len == n) or (s2 + overlap_len == n)
-                }
+                i += 1
 
     if min_dg == float('inf'):
         min_dg = 0.0

@@ -12,8 +12,8 @@ except ImportError:
 
 app = FastAPI(
     title="DNA Homodimer Screening Microservice",
-    description="High-throughput primer-dimer analysis distinguishing global MFE cofold from local 3'-end duplex interactions.",
-    version="4.0.0"
+    description="High-throughput primer-dimer service distinguishing global cofold MFE from local 3'-end duplex interactions.",
+    version="4.1.0"
 )
 
 # -----------------------------------------------------------------------------
@@ -22,9 +22,9 @@ app = FastAPI(
 
 class HomodimerRequest(BaseModel):
     sequence: str = Field(..., example="TGACTATAAGTCCTGGCGATTTGATGCA")
-    temperature_c: float = Field(60.0, description="PCR Reaction temperature in °C")
-    na_mM: float = Field(50.0, description="Monovalent cation concentration in mM")
-    mg_mM: float = Field(3.5, description="Divalent cation concentration in mM")
+    temperature_c: float = Field(60.0, description="Reaction temperature in °C")
+    na_mM: float = Field(50.0, description="Monovalent cation concentration (Na+) in mM")
+    mg_mM: float = Field(3.5, description="Divalent cation concentration (Mg2+) in mM")
     dntp_mM: float = Field(0.6, description="Total dNTP concentration in mM")
 
 class BatchHomodimerRequest(BaseModel):
@@ -47,7 +47,7 @@ class HomodimerResponse(BaseModel):
     three_prime_dimer_dg_kcal_mol: Optional[float]
     mfe_structure: str
     engine: str = "ViennaRNA"
-    model: str = "DNA cofold (SantaLucia 1998 / Owczarzy 2008 Hybrid)"
+    model: str = "DNA cofold + SantaLucia (1998) / Owczarzy (2008) Hybrid"
     temperature_c: float
     na_mM: float
     mg_mM: float
@@ -79,12 +79,12 @@ def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
 def calculate_monovalent_equivalent(na_mM: float, mg_mM: float, dntp_mM: float) -> float:
-    """Calculates equivalent monovalent concentration under free Mg2+ after dNTP chelation."""
+    """Calculates equivalent monovalent salt concentration under free Mg2+ (Owczarzy 2008)."""
     free_mg = max(0.0001, (mg_mM - dntp_mM) / 1000.0)
     return (na_mM / 1000.0) + 120.0 * math.sqrt(free_mg)
 
 def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, monovalent_eq: float) -> float:
-    """Scores a duplex stem using SantaLucia 1998 NN parameters with Owczarzy 2008 salt scaling."""
+    """Scores a contiguous stem using SantaLucia (1998) NN parameters with Owczarzy (2008) salt scaling."""
     T_k = temp_c + 273.15
     bp_count = len(sub1)
     if bp_count < 2:
@@ -107,7 +107,7 @@ def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, monovalent_eq
     return round(dg, 2)
 
 def calculate_local_duplex_dg(seq: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    """Evaluates maximum local contiguous alignment stability and isolates 3'-end interaction."""
+    """Evaluates local contiguous duplex alignments and isolates 3'-terminal interactions."""
     seq_clean = seq.upper().replace('U', 'T')
     comp_seq = get_complement(seq_clean)
     n = len(seq_clean)
@@ -182,38 +182,38 @@ def analyze_homodimer(req: HomodimerRequest):
         raise HTTPException(status_code=400, detail="Sequence must contain only standard DNA bases (A, C, G, T).")
 
     if not HAS_VIENNARNA:
-        raise HTTPException(status_code=500, detail="viennarna package is not installed.")
+        raise HTTPException(status_code=500, detail="ViennaRNA package ('viennarna') is not installed on the server.")
 
     try:
-        # 1. Configure ViennaRNA Model & Salt Attributes
+        # 1. Configure ViennaRNA Model Details
         md = RNA.md()
         md.temperature = req.temperature_c
 
-        # Calculate effective monovalent salt for ViennaRNA md attributes if supported
+        # Dynamically inject salt concentration into ViennaRNA's md struct if supported
         monovalent_eq = calculate_monovalent_equivalent(req.na_mM, req.mg_mM, req.dntp_mM)
         if hasattr(md, "salt"):
             md.salt = monovalent_eq
         elif hasattr(md, "salt_conc"):
             md.salt_conc = monovalent_eq
 
-        # Load DNA parameters
+        # Load DNA parameter file
         base_dir = os.path.dirname(__file__)
         param_file = os.path.join(base_dir, "dna_mathews1999.par")
         if os.path.exists(param_file):
             RNA.read_parameter_file(param_file)
 
-        # 2. ViennaRNA Global Cofold MFE
+        # 2. Compute ViennaRNA Global Cofold MFE
         duplex_seq = f"{seq_clean}&{seq_clean}"
         fc = RNA.fold_compound(duplex_seq, md)
         struct, raw_mfe = fc.mfe_dimer()
         global_mfe = round(raw_mfe, 2)
 
-        # 3. Local Alignment & 3'-End Duplex Evaluation
+        # 3. Compute Local Interaction & 3'-End Duplex Stability
         local_dg, three_prime_dg, alignment = calculate_local_duplex_dg(
             seq_clean, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
         )
 
-        # 4. Risk Flagging
+        # 4. Diagnostic Risk Flagging
         global_risk = global_mfe < -5.0
         three_prime_risk = (three_prime_dg is not None) and (three_prime_dg < -3.0)
         redesign = global_risk or three_prime_risk

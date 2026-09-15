@@ -34,109 +34,128 @@ COMPLEMENT = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
 def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
-def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    """Scores duplex stem pairing under SantaLucia 1998 + Owczarzy 2008 divalent salt model."""
+def parse_dot_bracket_pairs(struct: str):
+    """Parses a duplex dot-bracket string (strand1&strand2) into explicit base pair index tuples."""
+    parts = struct.split('&')
+    if len(parts) != 2:
+        return []
+
+    s1, s2 = parts[0], parts[1]
+    stack = []
+    pairs = []
+
+    # Push positions of opening brackets on strand 1
+    for i, char in enumerate(s1):
+        if char == '(':
+            stack.append(i)
+
+    # Match against closing brackets on strand 2 (processed in reverse order)
+    s2_closing = [j for j, char in enumerate(s2) if char == ')']
+    
+    while stack and s2_closing:
+        p1 = stack.pop()
+        p2 = s2_closing.pop(0)
+        pairs.append((p1, p2))
+
+    pairs.sort(key=lambda x: x[0])
+    return pairs
+
+def score_stem_from_structure(seq: str, struct: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
+    """Extracts contiguous stems from ViennaRNA topology and scores them using SantaLucia/Owczarzy."""
+    seq_clean = seq.upper().replace('U', 'T')
+    n = len(seq_clean)
+
     T_k = temp_c + 273.15
     free_mg = max(0.0001, (mg_mM - dntp_mM) / 1000.0)
     monovalent_eq = (na_mM / 1000.0) + 120.0 * math.sqrt(free_mg)
 
-    bp_count = len(sub1)
-    if bp_count < 2:
-        return 0.0
+    pairs = parse_dot_bracket_pairs(struct)
+    if not pairs:
+        return 0.0, None
 
-    block_dh = 0.0
-    block_ds = 0.0
-
-    # Helix initiation penalty
-    if sub1[0] in 'AT':
-        block_dh += 2.3; block_ds += 4.1
-    else:
-        block_dh += 0.1; block_ds += -2.8
-
-    for i in range(bp_count - 1):
-        pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
-        if pair_key in NN_PARAMS:
-            dh, ds = NN_PARAMS[pair_key]
-            block_dh += dh
-            block_ds += ds
-
-    # Owczarzy 2008 salt correction on dS
-    ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
-    dg = block_dh - (T_k * (ds_corr / 1000.0))
-    return dg
-
-def calculate_dynamic_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    seq_clean = sequence.upper().replace('U', 'T')
-    comp_seq = get_complement(seq_clean)
-    n = len(seq_clean)
-
-    struct = ""
-    if HAS_VIENNARNA:
-        md = RNA.md()
-        md.temperature = temp_c
-        RNA.read_parameter_file("dna_mathews1999.par")
-        duplex_seq = f"{seq_clean}&{seq_clean}"
-        fc = RNA.fold_compound(duplex_seq, md)
-        struct, _ = fc.mfe_dimer()
+    # Group paired positions into contiguous stems
+    stems = []
+    curr_stem = [pairs[0]]
+    for p in pairs[1:]:
+        prev_p1, prev_p2 = curr_stem[-1]
+        # Check if adjacent in sequence on strand 1 and strand 2
+        if p[0] == prev_p1 + 1 and abs(p[1] - prev_p2) == 1:
+            curr_stem.append(p)
+        else:
+            stems.append(curr_stem)
+            curr_stem = [p]
+    stems.append(curr_stem)
 
     best_dg = float('inf')
-    best_alignment = None
+    best_align = None
 
-    # Scan antiparallel alignments across all offsets
-    for offset in range(-(n - 1), n):
-        s1 = max(0, offset)
-        s2 = max(0, -offset)
-        overlap_len = min(n - s1, n - s2)
-
-        if overlap_len < 2:
+    for stem in stems:
+        bp_count = len(stem)
+        if bp_count < 2:
             continue
 
-        sub1 = seq_clean[s1:s1 + overlap_len]
-        sub2 = comp_seq[::-1][s2:s2 + overlap_len]
-        is_3prime = (s1 + overlap_len == n) or (s2 + overlap_len == n)
+        s1_indices = [p[0] for p in stem]
+        s2_indices = [p[1] for p in stem]
 
-        # Track contiguous base-paired blocks
-        i = 0
-        while i < overlap_len - 1:
-            pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+        s1_str = "".join(seq_clean[i] for i in s1_indices)
+        # Reverse strand 2 sequence to maintain 5'->3' / 3'->5' antiparallel orientation
+        s2_str = "".join(get_complement(seq_clean[j]) for j in reversed(s2_indices))
+
+        block_dh = 0.0
+        block_ds = 0.0
+
+        # Initiation penalty
+        if s1_str[0] in 'AT':
+            block_dh += 2.3; block_ds += 4.1
+        else:
+            block_dh += 0.1; block_ds += -2.8
+
+        for i in range(bp_count - 1):
+            pair_key = f"{s1_str[i]}{s1_str[i+1]}/{s2_str[i]}{s2_str[i+1]}"
             if pair_key in NN_PARAMS:
-                start_idx = i
-                bp_count = 1
-                while i < overlap_len - 1:
-                    pk = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
-                    if pk in NN_PARAMS:
-                        bp_count += 1
-                        i += 1
-                    else:
-                        break
+                dh, ds = NN_PARAMS[pair_key]
+                block_dh += dh
+                block_ds += ds
 
-                block_sub1 = sub1[start_idx:start_idx + bp_count]
-                block_sub2 = sub2[start_idx:start_idx + bp_count]
+        # Owczarzy (2008) Divalent Salt Correction
+        ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
+        dg = block_dh - (T_k * (ds_corr / 1000.0))
 
-                dg = score_stem_thermodynamics(block_sub1, block_sub2, temp_c, na_mM, mg_mM, dntp_mM)
+        is_3prime = (max(s1_indices) == n - 1) or (max(s2_indices) == n - 1)
 
-                if dg < best_dg:
-                    best_dg = dg
-                    best_alignment = {
-                        "seq1": block_sub1,
-                        "seq2": block_sub2,
-                        "overlap_len": bp_count,
-                        "is_3prime_end": is_3prime,
-                        "structure": struct
-                    }
-            else:
-                i += 1
+        if dg < best_dg:
+            best_dg = dg
+            best_align = {
+                "seq1": s1_str,
+                "seq2": s2_str,
+                "overlap_len": bp_count,
+                "is_3prime_end": is_3prime,
+                "structure": struct
+            }
 
     if best_dg == float('inf'):
         best_dg = 0.0
 
-    return round(best_dg, 2), best_alignment
+    return round(best_dg, 2), best_align
 
 @app.post("/analyze")
 def analyze_homodimer(req: HomodimerRequest):
     try:
-        dg, alignment = calculate_dynamic_homodimer(
-            req.sequence, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
+        seq = req.sequence.upper().replace('U', 'T')
+
+        if HAS_VIENNARNA:
+            md = RNA.md()
+            md.temperature = req.temperature_c
+            RNA.read_parameter_file("dna_mathews1999.par")
+
+            duplex_seq = f"{seq}&{seq}"
+            fc = RNA.fold_compound(duplex_seq, md)
+            struct, _ = fc.mfe_dimer()
+        else:
+            raise HTTPException(status_code=500, detail="ViennaRNA library (viennarna) is required.")
+
+        dg, alignment = score_stem_from_structure(
+            seq, struct, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
         )
 
         warning = dg < -5.0 or (alignment and alignment["is_3prime_end"] and dg < -3.0)

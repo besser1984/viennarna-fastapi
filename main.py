@@ -6,9 +6,9 @@ app = FastAPI()
 
 class HomodimerRequest(BaseModel):
     sequence: str = Field(..., example="GCGAATTCGC")
-    temperature_c: float = Field(37.0, description="Temperature in Celsius")
+    temperature_c: float = Field(60.0, description="Temperature in Celsius")
     na_mM: float = Field(50.0, description="Monovalent Na+ concentration in mM")
-    mg_mM: float = Field(1.5, description="Divalent Mg2+ concentration in mM")
+    mg_mM: float = Field(3.5, description="Divalent Mg2+ concentration in mM")
 
 # SantaLucia (1998) Unified NN Parameters (dH in kcal/mol, dS in cal/mol/K at 1 M Na+)
 NN_PARAMS = {

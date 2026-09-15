@@ -52,10 +52,9 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
     n = len(seq1)
     
     T_kelvin = temp_c + 273.15
-    min_dg = 0.0
+    min_dg = float('inf')  # Track absolute minimum ΔG across all alignments
     best_alignment = None
 
-    # Slide antiparallel strands through all offset positions
     for offset in range(-(n - 1), n):
         start1 = max(0, offset)
         start2 = max(0, -offset)
@@ -70,7 +69,7 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         total_dh = 0.0
         total_ds = 0.0
         
-        # Terminal initiation penalties (SantaLucia 1998)
+        # Initiation penalties
         if sub1[0] in 'AT': total_dh += 2.3; total_ds += 4.1
         else: total_dh += 0.1; total_ds += -2.8
 
@@ -87,10 +86,9 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
         # Apply Na+ / Mg2+ correction to entropy
         total_ds_corrected = calculate_salt_corrected_ds(total_ds, overlap_len, na_mM, mg_mM)
 
-        # Calculate ΔG°(T) = ΔH° - T * ΔS°_corrected (convert dS from cal to kcal)
+        # ΔG°(T) = ΔH° - T * ΔS°_corrected
         dg = total_dh - (T_kelvin * (total_ds_corrected / 1000.0))
         
-        # Track Global Minimum ΔG
         if dg < min_dg:
             min_dg = dg
             best_alignment = {
@@ -101,8 +99,11 @@ def calculate_homodimer(sequence: str, temp_c: float, na_mM: float, mg_mM: float
                 "is_3prime_end": (start1 + overlap_len == n) or (start2 + overlap_len == n)
             }
 
-    return round(min_dg, 2), best_alignment
+    # Fallback if sequence is too short to form overlaps
+    if min_dg == float('inf'):
+        min_dg = 0.0
 
+    return round(min_dg, 2), best_alignment
 @app.post("/analyze")
 def analyze_homodimer(req: HomodimerRequest):
     try:

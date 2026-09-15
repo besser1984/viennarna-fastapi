@@ -35,7 +35,7 @@ def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
 def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    """Scores a duplex stem using SantaLucia 1998 + Owczarzy 2008 divalent salt corrections."""
+    """Scores duplex stem pairing under SantaLucia 1998 + Owczarzy 2008 divalent salt model."""
     T_k = temp_c + 273.15
     free_mg = max(0.0001, (mg_mM - dntp_mM) / 1000.0)
     monovalent_eq = (na_mM / 1000.0) + 120.0 * math.sqrt(free_mg)
@@ -60,6 +60,7 @@ def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, na_mM: float,
             block_dh += dh
             block_ds += ds
 
+    # Owczarzy 2008 salt correction on dS
     ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
     dg = block_dh - (T_k * (ds_corr / 1000.0))
     return dg
@@ -69,7 +70,6 @@ def calculate_dynamic_homodimer(sequence: str, temp_c: float, na_mM: float, mg_m
     comp_seq = get_complement(seq_clean)
     n = len(seq_clean)
 
-    # 1. Obtain structural fold topology via ViennaRNA if present
     struct = ""
     if HAS_VIENNARNA:
         md = RNA.md()
@@ -82,28 +82,52 @@ def calculate_dynamic_homodimer(sequence: str, temp_c: float, na_mM: float, mg_m
     best_dg = float('inf')
     best_alignment = None
 
-    # 2. Dynamic evaluation of all self-complementary sub-stems & terminal alignments
-    for length in range(2, n + 1):
-        for i in range(n - length + 1):
-            sub1 = seq_clean[i:i + length]
-            sub2 = comp_seq[i:i + length][::-1]
-            
-            # Check if region forms a valid double-stranded stem
-            if sub1 == get_complement(sub1)[::-1]:
-                dg = score_stem_thermodynamics(sub1, sub1, temp_c, na_mM, mg_mM, dntp_mM)
-                is_3prime = (i + length == n)
+    # Scan antiparallel alignments across all offsets
+    for offset in range(-(n - 1), n):
+        s1 = max(0, offset)
+        s2 = max(0, -offset)
+        overlap_len = min(n - s1, n - s2)
+
+        if overlap_len < 2:
+            continue
+
+        sub1 = seq_clean[s1:s1 + overlap_len]
+        sub2 = comp_seq[::-1][s2:s2 + overlap_len]
+        is_3prime = (s1 + overlap_len == n) or (s2 + overlap_len == n)
+
+        # Track contiguous base-paired blocks
+        i = 0
+        while i < overlap_len - 1:
+            pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+            if pair_key in NN_PARAMS:
+                start_idx = i
+                bp_count = 1
+                while i < overlap_len - 1:
+                    pk = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+                    if pk in NN_PARAMS:
+                        bp_count += 1
+                        i += 1
+                    else:
+                        break
+
+                block_sub1 = sub1[start_idx:start_idx + bp_count]
+                block_sub2 = sub2[start_idx:start_idx + bp_count]
+
+                dg = score_stem_thermodynamics(block_sub1, block_sub2, temp_c, na_mM, mg_mM, dntp_mM)
 
                 if dg < best_dg:
                     best_dg = dg
                     best_alignment = {
-                        "seq1": sub1,
-                        "seq2": sub2,
-                        "overlap_len": length,
+                        "seq1": block_sub1,
+                        "seq2": block_sub2,
+                        "overlap_len": bp_count,
                         "is_3prime_end": is_3prime,
                         "structure": struct
                     }
+            else:
+                i += 1
 
-    if best_dg == float('inf') or best_dg == 0.0:
+    if best_dg == float('inf'):
         best_dg = 0.0
 
     return round(best_dg, 2), best_alignment

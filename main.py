@@ -13,8 +13,16 @@ def health_check():
 
 def generate_svg_string(sequence: str, structure: str) -> str:
     """Generates a clean SVG plot string directly from NAView coordinates."""
-    # Extract nucleotide 2D coordinates
-    x_coords, y_coords = RNA.naview_xy_coordinates(structure)
+    # ViennaRNA returns a 3-element tuple or coordinate object; unpack safely
+    res = RNA.naview_xy_coordinates(structure)
+    if isinstance(res, tuple) and len(res) >= 2:
+        x_coords, y_coords = res[0], res[1]
+    else:
+        x_coords, y_coords = res.X, res.Y
+
+    # Convert coordinates to standard Python lists of floats
+    x_coords = [float(x) for x in x_coords]
+    y_coords = [float(y) for y in y_coords]
     
     # Calculate bounding box
     margin = 40
@@ -23,7 +31,7 @@ def generate_svg_string(sequence: str, structure: str) -> str:
     width = max_x - min_x
     height = max_y - min_y
 
-    # Build base-pairing pairs
+    # Build base-pairing pairs from dot-bracket structure
     stack = []
     pairs = []
     for i, char in enumerate(structure):
@@ -57,7 +65,7 @@ def generate_svg_string(sequence: str, structure: str) -> str:
             f'<line x1="{x_coords[i]}" y1="{y_coords[i]}" x2="{x_coords[j]}" y2="{y_coords[j]}" class="bond" />'
         )
 
-    # Draw nucleotide nodes & letters
+    # Draw nucleotide nodes & text labels
     for i, nuc in enumerate(sequence):
         svg_lines.append(
             f'<circle cx="{x_coords[i]}" cy="{y_coords[i]}" r="8" class="node" />'

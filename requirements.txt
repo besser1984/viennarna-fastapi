@@ -1,4 +1,4 @@
-fastapi
-uvicorn
-primer3-py
-viennarna
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+primer3-py>=2.0.0
+viennarna>=2.6.0

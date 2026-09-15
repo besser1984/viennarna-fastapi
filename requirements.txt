@@ -1,3 +1,4 @@
 fastapi
 uvicorn
 primer3-py
+viennarna

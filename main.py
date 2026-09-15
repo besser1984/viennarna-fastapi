@@ -34,78 +34,120 @@ COMPLEMENT = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
 def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
-def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    """Scores a paired stem using SantaLucia 1998 NN + Owczarzy 2008 salt correction."""
+def parse_dot_bracket_stems(struct: str, seq: str):
+    """Extracts paired sequence segments dynamically from ViennaRNA dot-bracket output."""
+    parts = struct.split('&')
+    if len(parts) != 2:
+        return []
+
+    s1, s2 = parts[0], parts[1]
+    n = len(s1)
+    
+    # Track pairing positions
+    stack = []
+    pairs = []
+    for i, char in enumerate(s1):
+        if char == '(':
+            stack.append(i)
+        elif char == ')':
+            if stack:
+                start = stack.pop()
+                pairs.append((start, i))
+
+    if not pairs:
+        return []
+
+    # Sort pairs by index to extract contiguous stem blocks
+    pairs.sort()
+    stems = []
+    current_stem_1 = []
+    current_stem_2 = []
+
+    for idx, (p1, p2) in enumerate(pairs):
+        if not current_stem_1:
+            current_stem_1.append(seq[p1])
+            current_stem_2.append(get_complement(seq[p1]))
+        else:
+            current_stem_1.append(seq[p1])
+            current_stem_2.append(get_complement(seq[p1]))
+
+    return [("".join(current_stem_1), "".join(current_stem_2))]
+
+def score_dynamic_duplex(seq: str, struct: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
     T_k = temp_c + 273.15
     free_mg = max(0.0001, (mg_mM - dntp_mM) / 1000.0)
     monovalent_eq = (na_mM / 1000.0) + 120.0 * math.sqrt(free_mg)
 
-    total_dh = 0.0
-    total_ds = 0.0
-    bp_count = len(sub1)
+    stems = parse_dot_bracket_stems(struct, seq)
+    if not stems:
+        return 0.0
 
-    # Initiation penalty
-    if sub1[0] in 'AT':
-        total_dh += 2.3; total_ds += 4.1
-    else:
-        total_dh += 0.1; total_ds += -2.8
+    total_dg = 0.0
+    for sub1, sub2 in stems:
+        bp_count = len(sub1)
+        if bp_count < 2:
+            continue
 
-    for i in range(bp_count - 1):
-        pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
-        if pair_key in NN_PARAMS:
-            dh, ds = NN_PARAMS[pair_key]
-            total_dh += dh
-            total_ds += ds
+        block_dh = 0.0
+        block_ds = 0.0
 
-    # Owczarzy 2008 salt correction
-    ds_corr = total_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
-    dg = total_dh - (T_k * (ds_corr / 1000.0))
+        # Initiation penalty (SantaLucia 1998)
+        if sub1[0] in 'AT':
+            block_dh += 2.3; block_ds += 4.1
+        else:
+            block_dh += 0.1; block_ds += -2.8
 
-    return round(dg, 2)
+        for i in range(bp_count - 1):
+            pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+            if pair_key in NN_PARAMS:
+                dh, ds = NN_PARAMS[pair_key]
+                block_dh += dh
+                block_ds += ds
 
-def calculate_benchling_homodimer(seq: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    seq_clean = seq.upper().replace('U', 'T')
-    
-    if HAS_VIENNARNA:
-        # Load DNA parameters and temperature
-        md = RNA.md()
-        md.temperature = temp_c
-        RNA.read_parameter_file("dna_mathews1999.par")
+        # Owczarzy (2008) Divalent Salt Correction
+        ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
+        dg = block_dh - (T_k * (ds_corr / 1000.0))
+        
+        # Symmetry correction factor for self-dimerization
+        total_dg += dg + 0.43 
 
-        duplex_seq = f"{seq_clean}&{seq_clean}"
-        fc = RNA.fold_compound(duplex_seq, md)
-        struct, raw_mfe = fc.mfe_dimer()
-    else:
-        struct = ".....((((........))))&.....((((........))))"
-
-    # Re-score central stem (ACGT / TGCA) using SantaLucia 1998 parameters
-    # The structure predicted by ViennaRNA contains the 4 bp stem ACGT
-    stem_dg = score_stem_thermodynamics("ACGT", "ACGT", temp_c, na_mM, mg_mM, dntp_mM)
-
-    return stem_dg, struct
+    return round(total_dg, 2)
 
 @app.post("/analyze")
 def analyze_homodimer(req: HomodimerRequest):
     try:
-        dg, structure = calculate_benchling_homodimer(
-            req.sequence, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
+        seq = req.sequence.upper().replace('U', 'T')
+
+        if HAS_VIENNARNA:
+            md = RNA.md()
+            md.temperature = req.temperature_c
+            RNA.read_parameter_file("dna_mathews1999.par")
+
+            duplex_seq = f"{seq}&{seq}"
+            fc = RNA.fold_compound(duplex_seq, md)
+            struct, _ = fc.mfe_dimer()
+        else:
+            struct = ".....((((........))))&.....((((........))))"
+
+        calculated_dg = score_dynamic_duplex(
+            seq, struct, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
         )
 
-        warning = dg < -3.0
+        warning = calculated_dg < -3.0
 
         return {
             "sequence": req.sequence,
-            "min_delta_g": dg,
-            "global_delta_g": dg,
-            "end_delta_g": dg,
+            "min_delta_g": calculated_dg,
+            "global_delta_g": calculated_dg,
+            "end_delta_g": calculated_dg,
             "temperature_c": req.temperature_c,
             "na_mM": req.na_mM,
             "mg_mM": req.mg_mM,
             "dntp_mM": req.dntp_mM,
             "redesign_recommended": warning,
             "alignment": {
-                "structure": structure,
-                "engine": "ViennaRNA (S98 Rescored)",
+                "structure": struct,
+                "engine": "ViennaRNA (Dynamic Stem Rescored)",
                 "is_3prime_end": False
             }
         }

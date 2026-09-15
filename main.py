@@ -1,4 +1,5 @@
 import math
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -8,16 +9,16 @@ try:
 except ImportError:
     HAS_VIENNARNA = False
 
-app = FastAPI()
+app = FastAPI(title="DNA Homodimer Analyzer Microservice")
 
 class HomodimerRequest(BaseModel):
-    sequence: str = Field(..., example="ACAGGATCACGTCCCTCCCC")
+    sequence: str = Field(..., example="TGACTATAAGTCCTGGCGATTTGATGCA")
     temperature_c: float = Field(60.0)
     na_mM: float = Field(50.0)
     mg_mM: float = Field(3.5)
     dntp_mM: float = Field(0.6)
 
-# SantaLucia (1998) Unified NN Table (dH in kcal/mol, dS in cal/mol/K)
+# SantaLucia (1998) Unified NN parameters (dH in kcal/mol, dS in cal/mol/K)
 NN_PARAMS = {
     "AA/TT": (-7.6, -21.3), "TT/AA": (-7.6, -21.3),
     "AT/TA": (-7.2, -20.4), "TA/AT": (-7.2, -21.3),
@@ -35,36 +36,59 @@ def get_complement(seq: str) -> str:
     return "".join(COMPLEMENT.get(b, 'N') for b in seq)
 
 def parse_dot_bracket_pairs(struct: str):
-    """Parses duplex structure (strand1&strand2) into explicit base-pairing index maps."""
+    """Parses duplex structure (strand1&strand2) into aligned base-pairing index maps."""
     parts = struct.split('&')
     if len(parts) != 2:
         return []
 
     s1, s2 = parts[0], parts[1]
-    s1_stack = [i for i, char in enumerate(s1) if char == '(']
-    s2_closing = [j for j, char in enumerate(s2) if char == ')']
+    s1_open = [i for i, c in enumerate(s1) if c == '(']
+    s2_close = [j for j, c in enumerate(s2) if c == ')']
 
-    # Pair opening brackets on Strand 1 with closing brackets on Strand 2
-    pairs = []
-    while s1_stack and s2_closing:
-        p1 = s1_stack.pop()
-        p2 = s2_closing.pop(0)
-        pairs.append((p1, p2))
+    if len(s1_open) != len(s2_close):
+        return []
 
-    pairs.sort(key=lambda x: x[0])
-    return pairs
+    return list(zip(s1_open, s2_close))
 
-def evaluate_duplex_structure(seq: str, struct: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
-    seq_clean = seq.upper().replace('U', 'T')
-    n = len(seq_clean)
-
+def score_stem_thermodynamics(sub1: str, sub2: str, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
+    """Scores a duplex stem using SantaLucia (1998) + Owczarzy (2008) salt scaling."""
     T_k = temp_c + 273.15
     free_mg = max(0.0001, (mg_mM - dntp_mM) / 1000.0)
     monovalent_eq = (na_mM / 1000.0) + 120.0 * math.sqrt(free_mg)
 
+    bp_count = len(sub1)
+    if bp_count < 2:
+        return 0.0
+
+    # Helix initiation term (SantaLucia 1998)
+    block_dh = 2.3 if sub1[0] in 'AT' else 0.1
+    block_ds = 4.1 if sub1[0] in 'AT' else -2.8
+
+    # Terminal base pair penalty for helix end
+    if sub1[-1] in 'AT':
+        block_dh += 2.3; block_ds += 4.1
+    else:
+        block_dh += 0.1; block_ds += -2.8
+
+    for i in range(bp_count - 1):
+        pair_key = f"{sub1[i]}{sub1[i+1]}/{sub2[i]}{sub2[i+1]}"
+        if pair_key in NN_PARAMS:
+            dh, ds = NN_PARAMS[pair_key]
+            block_dh += dh
+            block_ds += ds
+
+    # Owczarzy (2008) Divalent Salt Correction
+    ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
+    dg = block_dh - (T_k * (ds_corr / 1000.0))
+    return dg
+
+def evaluate_duplex_thermodynamics(seq: str, struct: str, raw_mfe: float, temp_c: float, na_mM: float, mg_mM: float, dntp_mM: float):
+    seq_clean = seq.upper().replace('U', 'T')
+    n = len(seq_clean)
+
     pairs = parse_dot_bracket_pairs(struct)
     if not pairs:
-        return 0.0, None
+        return raw_mfe, raw_mfe, 0.0, None
 
     # Group paired indices into contiguous stem blocks
     stems = []
@@ -78,7 +102,8 @@ def evaluate_duplex_structure(seq: str, struct: str, temp_c: float, na_mM: float
             curr_stem = [p]
     stems.append(curr_stem)
 
-    best_dg = float('inf')
+    min_dg = float('inf')
+    end_dg = 0.0
     best_align = None
 
     for stem in stems:
@@ -92,24 +117,11 @@ def evaluate_duplex_structure(seq: str, struct: str, temp_c: float, na_mM: float
         s1_str = "".join(seq_clean[i] for i in s1_indices)
         s2_str = "".join(get_complement(seq_clean[j]) for j in reversed(s2_indices))
 
-        block_dh = 2.3 if s1_str[0] in 'AT' else 0.1
-        block_ds = 4.1 if s1_str[0] in 'AT' else -2.8
-
-        for i in range(bp_count - 1):
-            pair_key = f"{s1_str[i]}{s1_str[i+1]}/{s2_str[i]}{s2_str[i+1]}"
-            if pair_key in NN_PARAMS:
-                dh, ds = NN_PARAMS[pair_key]
-                block_dh += dh
-                block_ds += ds
-
-        # Owczarzy (2008) Divalent Salt Correction
-        ds_corr = block_ds + (0.368 * (bp_count - 1) * math.log(monovalent_eq))
-        dg = block_dh - (T_k * (ds_corr / 1000.0))
-
+        dg = score_stem_thermodynamics(s1_str, s2_str, temp_c, na_mM, mg_mM, dntp_mM)
         is_3prime = (max(s1_indices) == n - 1) or (max(s2_indices) == n - 1)
 
-        if dg < best_dg:
-            best_dg = dg
+        if dg < min_dg:
+            min_dg = dg
             best_align = {
                 "seq1": s1_str,
                 "seq2": s2_str,
@@ -118,40 +130,49 @@ def evaluate_duplex_structure(seq: str, struct: str, temp_c: float, na_mM: float
                 "structure": struct
             }
 
-    if best_dg == float('inf'):
-        best_dg = 0.0
+        if is_3prime and (end_dg == 0.0 or dg < end_dg):
+            end_dg = dg
 
-    return round(best_dg, 2), best_align
+    if min_dg == float('inf'):
+        min_dg = 0.0
+
+    return round(raw_mfe, 2), round(min_dg, 2), round(end_dg, 2), best_align
 
 @app.post("/analyze")
 def analyze_homodimer(req: HomodimerRequest):
+    seq_clean = req.sequence.upper().replace('U', 'T')
+
+    # 6. Sequence character validation
+    if not all(c in "ACGT" for c in seq_clean):
+        raise HTTPException(status_code=400, detail="Sequence must contain only standard DNA bases (A, C, G, T).")
+
+    if not HAS_VIENNARNA:
+        raise HTTPException(status_code=500, detail="viennarna package is not installed.")
+
     try:
-        seq = req.sequence.upper().replace('U', 'T')
-
-        if not HAS_VIENNARNA:
-            raise HTTPException(status_code=500, detail="viennarna is required.")
-
-        # 1. Fold compound with DNA parameters at specified temperature
         md = RNA.md()
         md.temperature = req.temperature_c
-        RNA.read_parameter_file("dna_mathews1999.par")
 
-        duplex_seq = f"{seq}&{seq}"
+        # 7. Parameter file path validation
+        param_file = "dna_mathews1999.par"
+        if os.path.exists(param_file):
+            RNA.read_parameter_file(param_file)
+
+        duplex_seq = f"{seq_clean}&{seq_clean}"
         fc = RNA.fold_compound(duplex_seq, md)
-        struct, _ = fc.mfe_dimer()
+        struct, raw_mfe = fc.mfe_dimer()
 
-        # 2. Extract and score true stem structures
-        dg, alignment = evaluate_duplex_structure(
-            seq, struct, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
+        global_dg, min_dg, end_dg, alignment = evaluate_duplex_thermodynamics(
+            req.sequence, struct, raw_mfe, req.temperature_c, req.na_mM, req.mg_mM, req.dntp_mM
         )
 
-        warning = dg < -5.0 or (alignment and alignment.get("is_3prime_end") and dg < -3.0)
+        warning = global_dg < -5.0 or (alignment and alignment.get("is_3prime_end") and end_dg < -3.0)
 
         return {
             "sequence": req.sequence,
-            "min_delta_g": dg,
-            "global_delta_g": dg,
-            "end_delta_g": dg,
+            "min_delta_g": min_dg,
+            "global_delta_g": global_dg,
+            "end_delta_g": end_dg,
             "temperature_c": req.temperature_c,
             "na_mM": req.na_mM,
             "mg_mM": req.mg_mM,

@@ -9,33 +9,35 @@ class HomodimerRequest(BaseModel):
     temperature_c: float = Field(60.0)
     na_mM: float = Field(50.0)
     mg_mM: float = Field(3.5)
-    dntp_mM: float = Field(0.6, description="dNTP concentration in mM")
+    dntp_mM: float = Field(0.6)
 
 @app.post("/analyze")
 def analyze_homodimer(req: HomodimerRequest):
     try:
         seq = req.sequence.upper().replace('U', 'T')
-        p3_mod = getattr(primer3, 'bindings', primer3)
         
-        # calc_end_stability automatically computes Owczarzy divalent salt 
-        # effects when dv_conc and dntp_conc are provided.
-        end_res = p3_mod.calc_end_stability(
-            seq,
-            seq,
-            mv_conc=req.na_mM,
-            dv_conc=req.mg_mM,
-            dntp_conc=req.dntp_mM,
-            temp_c=req.temperature_c
+        # Calculate 3'-end stability explicitly passing all buffer parameters
+        end_res = primer3.bindings.calc_end_stability(
+            seq1=seq,
+            seq2=seq,
+            mv_conc=float(req.na_mM),
+            dv_conc=float(req.mg_mM),
+            dntp_conc=float(req.dntp_mM),
+            dna_conc=50.0,  # 50 nM primer concentration (Benchling default)
+            temp_c=float(req.temperature_c)
         )
 
-        homo_res = p3_mod.calc_homodimer(
-            seq,
-            mv_conc=req.na_mM,
-            dv_conc=req.mg_mM,
-            dntp_conc=req.dntp_mM,
-            temp_c=req.temperature_c
+        # Calculate Global Homodimer stability
+        homo_res = primer3.bindings.calc_homodimer(
+            seq=seq,
+            mv_conc=float(req.na_mM),
+            dv_conc=float(req.mg_mM),
+            dntp_conc=float(req.dntp_mM),
+            dna_conc=50.0,
+            temp_c=float(req.temperature_c)
         )
 
+        # Convert dG from cal/mol to kcal/mol
         end_dg = round(end_res.dg / 1000.0, 2)
         global_dg = round(homo_res.dg / 1000.0, 2)
 
